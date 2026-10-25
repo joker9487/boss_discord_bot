@@ -14,8 +14,11 @@ KEY_RETRY = 10                                         # key 最多重抽幾次
 MAX_RANGE = 12 * 60                                    # 開始時間範圍最長 12 小時（分鐘）
 
 
-def now_str():
-    return datetime.now(TZ).strftime(TIME_FMT)
+#現在（或傳入的 now）轉成台北時間字串
+def now_str(now=None):
+    if now is None:
+        now = datetime.now(TZ)
+    return now.astimezone(TZ).strftime(TIME_FMT)
 
 
 def generate_key(length=6):
@@ -83,6 +86,21 @@ def join_room(conn, key, user_id):
 
 def is_leader(room, user_id):
     return user_id == room["leader_id"]
+
+
+#這個人在的所有房間
+def user_rooms(conn, user_id):
+    return conn.execute(
+        "SELECT rooms.* FROM rooms JOIN members ON members.room_id = rooms.id "
+        "WHERE members.user_id=? ORDER BY rooms.id",
+        (user_id,),
+    ).fetchall()
+
+
+#房間成員 id（照加入順序，隊長第一個）
+def member_ids(conn, room_id):
+    rows = conn.execute("SELECT user_id FROM members WHERE room_id=? ORDER BY rowid", (room_id,))
+    return [r["user_id"] for r in rows]
 
 
 

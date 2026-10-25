@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta
 
-from rooms import TIME_FMT, TZ, range_length
+from rooms import TIME_FMT, now_str, range_length
 
 DATE_FMT = "%Y-%m-%d"
 STEP = 30          # 一格幾分鐘
@@ -21,9 +21,7 @@ def all_start_times(room, night):
 
 #那一晚還沒過去的開始時間（最多 25 個）
 def start_times(room, night, now=None):
-    if now is None:
-        now = datetime.now(TZ)
-    now_s = now.astimezone(TZ).strftime(TIME_FMT)
+    now_s = now_str(now)
     return [s for s in all_start_times(room, night) if s >= now_s]   # 同格式字串可以直接比大小
 
 
