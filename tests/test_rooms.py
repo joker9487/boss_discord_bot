@@ -84,6 +84,38 @@ def test_duration_out_of_range(conn, duration):
     assert conn.execute("SELECT COUNT(*) FROM rooms").fetchone()[0] == 0
 
 
+# 開始時間範圍
+@pytest.mark.parametrize("start, end", [
+    ("18:00", "02:00"),   # 跨午夜
+    ("23:00", "01:00"),
+    ("18:00", "06:00"),   # 剛好 12 小時（跨午夜）
+    ("06:00", "18:00"),   # 剛好 12 小時（同一天）
+    ("20:30", "21:00"),
+])
+def test_range_ok(conn, start, end):
+    key = create_room(conn, "房", LEADER, CHANNEL, 2, start, end)
+    assert get_room(conn, key)["range_start"] == start
+
+
+@pytest.mark.parametrize("start, end", [
+    ("18:00", "06:30"),   # 12.5 小時（跨午夜）
+    ("06:00", "18:30"),   # 12.5 小時（同一天）
+    ("18:00", "18:00"),   # end == start → 跨午夜 24 小時
+])
+def test_range_too_long(conn, start, end):
+    with pytest.raises(ValueError):
+        create_room(conn, "房", LEADER, CHANNEL, 2, start, end)
+
+
+@pytest.mark.parametrize("bad", ["18:15", "8:00", "24:00", "18-00", "aa:bb", "18:00 ", "", None])
+def test_range_bad_format(conn, bad):
+    with pytest.raises(ValueError):
+        create_room(conn, "房", LEADER, CHANNEL, 2, bad, "22:00")
+    with pytest.raises(ValueError):
+        create_room(conn, "房", LEADER, CHANNEL, 2, "18:00", bad)
+    assert conn.execute("SELECT COUNT(*) FROM rooms").fetchone()[0] == 0
+
+
 # 加入
 def test_join_room(conn):
     key = make_room(conn)
