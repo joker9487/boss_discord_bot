@@ -19,6 +19,16 @@ def all_start_times(room, night):
     return [(first + timedelta(minutes=STEP * i)).strftime(TIME_FMT) for i in range(steps + 1)]
 
 
+#start_at 屬於哪一晚（跨午夜的時段算前一晚）；不是這個房間的開始時間 → None
+def night_of(room, start_at):
+    day = datetime.strptime(start_at, TIME_FMT)
+    for d in (day, day - timedelta(days=1)):
+        night = d.strftime(DATE_FMT)
+        if start_at in all_start_times(room, night):
+            return night
+    return None
+
+
 #那一晚還沒過去的開始時間（最多 25 個）
 def start_times(room, night, now=None):
     now_s = now_str(now)

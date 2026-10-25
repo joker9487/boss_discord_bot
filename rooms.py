@@ -2,7 +2,7 @@ import re
 import secrets
 import sqlite3
 import string
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 
@@ -74,6 +74,10 @@ def get_room(conn, key):
     row = conn.execute("SELECT * FROM rooms WHERE key=?", (key,)).fetchone()
     return row
 
+#用 id 找 room
+def get_room_by_id(conn, room_id):
+    return conn.execute("SELECT * FROM rooms WHERE id=?", (room_id,)).fetchone()
+
 #user 加進 members
 def join_room(conn, key, user_id):
     room = get_room(conn, key)
@@ -103,8 +107,57 @@ def member_ids(conn, room_id):
     return [r["user_id"] for r in rows]
 
 
+#把成員移出房間；members 刪掉不會 CASCADE 到 availability，要自己刪
+def _remove_member(conn, room_id, user_id):
+    conn.execute("DELETE FROM availability WHERE room_id=? AND user_id=?", (room_id, user_id))
+    conn.execute("DELETE FROM members WHERE room_id=? AND user_id=?", (room_id, user_id))
+    conn.commit()
+
+
+def _get_room_or_error(conn, room_id):
+    room = get_room_by_id(conn, room_id)
+    if room is None:
+        raise ValueError("房間不存在")
+    return room
+
+
+#自己退出；隊長不能退出
+def leave_room(conn, room_id, user_id):
+    room = _get_room_or_error(conn, room_id)
+    if is_leader(room, user_id):
+        raise ValueError("隊長不能退出，要關房請用 /關房")
+    if user_id not in member_ids(conn, room_id):
+        raise ValueError("你不在這個房間裡")
+    _remove_member(conn, room_id, user_id)
+
+
+#隊長踢人：只有隊長、不能踢自己、對方要是成員
+def kick(conn, room_id, leader_id, target_id):
+    room = _get_room_or_error(conn, room_id)
+    if not is_leader(room, leader_id):
+        raise ValueError("只有隊長能踢人")
+    if target_id == leader_id:
+        raise ValueError("不能踢自己")
+    if target_id not in member_ids(conn, room_id):
+        raise ValueError("對方不在這個房間裡")
+    _remove_member(conn, room_id, target_id)
+
 
 #刪除房間
 def delete_room(conn, room_id):
      conn.execute("DELETE FROM rooms WHERE id =?", (room_id,))
      conn.commit()
+
+
+#自動清理：已定案且開始時間過 24 小時、或建房超過 7 天沒定案 → 刪掉；回傳刪了幾間
+def cleanup(conn, now=None):
+    if now is None:
+        now = datetime.now(TZ)
+    decided_cutoff = now_str(now - timedelta(hours=24))
+    open_cutoff = now_str(now - timedelta(days=7))
+    cur = conn.execute(
+        "DELETE FROM rooms WHERE (status='decided' AND decided_at < ?) OR (status='open' AND created_at < ?)",
+        (decided_cutoff, open_cutoff),
+    )
+    conn.commit()
+    return cur.rowcount
