@@ -3,7 +3,9 @@ import sqlite3
 import pytest
 
 import rooms
-from rooms import KEY_CHARS, KEY_RETRY, create_room, delete_room, get_room, is_leader, join_room
+from rooms import (
+    KEY_CHARS, KEY_RETRY, create_room, delete_room, get_room, is_leader, join_room, member_ids, user_rooms,
+)
 
 LEADER = 111
 OTHER = 222
@@ -12,11 +14,6 @@ CHANNEL = 999
 
 def make_room(conn, duration=2):
     return create_room(conn, "週五打王", LEADER, CHANNEL, duration, "18:00", "02:00")
-
-
-def member_ids(conn, room_id):
-    rows = conn.execute("SELECT user_id FROM members WHERE room_id=?", (room_id,))
-    return [r["user_id"] for r in rows]
 
 
 # 建房
@@ -134,6 +131,31 @@ def test_join_twice_counts_once(conn):
     join_room(conn, key, OTHER)
     room = join_room(conn, key, OTHER)
     assert member_ids(conn, room["id"]).count(OTHER) == 1
+
+
+# 成員 / 我的房間
+def test_member_ids_join_order(conn):
+    key = make_room(conn)
+    join_room(conn, key, 50)
+    room = join_room(conn, key, 30)
+    assert member_ids(conn, room["id"]) == [LEADER, 50, 30]
+
+
+def test_user_rooms(conn):
+    k1 = make_room(conn)
+    k2 = make_room(conn)
+    k3 = make_room(conn)
+    join_room(conn, k1, OTHER)
+    join_room(conn, k3, OTHER)
+    assert [r["key"] for r in user_rooms(conn, OTHER)] == [k1, k3]
+    assert [r["key"] for r in user_rooms(conn, LEADER)] == [k1, k2, k3]
+    assert user_rooms(conn, 12345) == []
+
+
+def test_user_rooms_after_delete(conn):
+    room = join_room(conn, make_room(conn), OTHER)
+    delete_room(conn, room["id"])
+    assert user_rooms(conn, OTHER) == []
 
 
 # 權限

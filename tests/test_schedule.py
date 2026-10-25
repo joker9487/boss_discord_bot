@@ -3,7 +3,7 @@ from datetime import datetime
 import pytest
 
 from rooms import TZ, create_room, get_room, join_room
-from schedule import decide, ranking, set_availability
+from schedule import decide, get_availability, ranking, set_availability
 
 LEADER = 111
 A = 222
@@ -71,7 +71,7 @@ def test_non_member_cannot_fill(conn, room):
 
 def test_decided_cannot_fill(conn, room):
     fill(conn, room, A, "2026-10-30 20:00")
-    decide(conn, room["id"], LEADER, "2026-10-30 20:00")
+    decide(conn, room["id"], LEADER, "2026-10-30 20:00", NOW)
     with pytest.raises(ValueError):
         fill(conn, room, A, "2026-10-30 21:00")
     assert picks(conn, room["id"], A) == ["2026-10-30 20:00"]
@@ -103,12 +103,25 @@ def test_room_not_found(conn):
         set_availability(conn, 12345, A, NIGHT, [], NOW)
 
 
+# get_availability
+def test_get_availability_only_that_night(conn, room):
+    fill(conn, room, A, "2026-10-30 18:00", "2026-10-31 01:30")
+    fill(conn, room, A, "2026-10-31 18:00", night="2026-10-31")
+    fill(conn, room, B, "2026-10-30 20:00")
+    assert get_availability(conn, room["id"], A, NIGHT) == ["2026-10-30 18:00", "2026-10-31 01:30"]
+    assert get_availability(conn, room["id"], A, "2026-10-31") == ["2026-10-31 18:00"]
+
+
+def test_get_availability_empty(conn, room):
+    assert get_availability(conn, room["id"], A, NIGHT) == []
+
+
 # ranking
 def test_ranking_order(conn, room):
     fill(conn, room, LEADER, "2026-10-30 18:00", "2026-10-30 20:00", "2026-10-31 00:00")
     fill(conn, room, A, "2026-10-30 20:00", "2026-10-30 21:00", "2026-10-31 00:00")
     fill(conn, room, B, "2026-10-30 20:00", "2026-10-30 21:00")
-    result = ranking(conn, room["id"])
+    result = ranking(conn, room["id"], now=NOW)
     assert result["members"] == 3
     assert result["slots"] == [
         {"start_at": "2026-10-30 20:00", "count": 3, "user_ids": [LEADER, A, B]},   # 全員
@@ -120,32 +133,66 @@ def test_ranking_order(conn, room):
 
 def test_ranking_top(conn, room):
     fill(conn, room, A, "2026-10-30 18:00", "2026-10-30 19:00", "2026-10-30 20:00")
-    starts = [s["start_at"] for s in ranking(conn, room["id"], top=2)["slots"]]
+    starts = [s["start_at"] for s in ranking(conn, room["id"], top=2, now=NOW)["slots"]]
     assert starts == ["2026-10-30 18:00", "2026-10-30 19:00"]
 
 
+def test_ranking_excludes_past(conn, room):
+    fill(conn, room, A, "2026-10-30 18:00", "2026-10-30 20:00", "2026-10-30 21:00")
+    fill(conn, room, B, "2026-10-30 18:00")
+    later = datetime(2026, 10, 30, 20, 0, tzinfo=TZ)
+    starts = [s["start_at"] for s in ranking(conn, room["id"], now=later)["slots"]]
+    assert starts == ["2026-10-30 20:00", "2026-10-30 21:00"]      # 18:00 人最多但已經過了
+
+
 def test_ranking_empty(conn, room):
-    assert ranking(conn, room["id"]) == {"members": 3, "slots": []}
+    assert ranking(conn, room["id"], now=NOW) == {"members": 3, "slots": []}
 
 
 # decide
 def test_decide(conn, room):
-    decide(conn, room["id"], LEADER, "2026-10-30 20:00")
+    decide(conn, room["id"], LEADER, "2026-10-30 20:00", NOW)
     r = get_room(conn, room["key"])
     assert r["status"] == "decided"
     assert r["decided_at"] == "2026-10-30 20:00"
 
 
+def test_decide_after_midnight(conn, room):
+    decide(conn, room["id"], LEADER, "2026-10-31 01:30", NOW)       # 屬於 10/30 那一晚
+    assert get_room(conn, room["key"])["decided_at"] == "2026-10-31 01:30"
+
+
+@pytest.mark.parametrize("bad", [
+    "2026-10-30 17:30",   # 範圍外
+    "2026-10-31 02:30",   # 範圍外（跨午夜之後）
+    "2026-10-30 20:15",   # 不是整點 / 半點
+    "2026-10-30 08:00",   # 已經過去
+    "2026-10-30 20:0",    # 格式錯
+    "",
+    None,
+])
+def test_decide_invalid_start(conn, room, bad):
+    with pytest.raises(ValueError):
+        decide(conn, room["id"], LEADER, bad, NOW)
+    assert get_room(conn, room["key"])["status"] == "open"
+
+
+def test_decide_past_slot_in_range(conn, room):
+    later = datetime(2026, 10, 30, 21, 0, tzinfo=TZ)
+    with pytest.raises(ValueError):
+        decide(conn, room["id"], LEADER, "2026-10-30 20:30", later)
+
+
 def test_non_leader_cannot_decide(conn, room):
     with pytest.raises(ValueError):
-        decide(conn, room["id"], A, "2026-10-30 20:00")
+        decide(conn, room["id"], A, "2026-10-30 20:00", NOW)
     r = get_room(conn, room["key"])
     assert r["status"] == "open"
     assert r["decided_at"] is None
 
 
 def test_decide_twice(conn, room):
-    decide(conn, room["id"], LEADER, "2026-10-30 20:00")
+    decide(conn, room["id"], LEADER, "2026-10-30 20:00", NOW)
     with pytest.raises(ValueError):
-        decide(conn, room["id"], LEADER, "2026-10-30 21:00")
+        decide(conn, room["id"], LEADER, "2026-10-30 21:00", NOW)
     assert get_room(conn, room["key"])["decided_at"] == "2026-10-30 20:00"
