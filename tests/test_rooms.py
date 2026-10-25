@@ -3,8 +3,11 @@ import sqlite3
 import pytest
 
 import rooms
+from datetime import datetime
+
 from rooms import (
-    KEY_CHARS, KEY_RETRY, create_room, delete_room, get_room, is_leader, join_room, member_ids, user_rooms,
+    KEY_CHARS, KEY_RETRY, TZ, cleanup, create_room, delete_room, get_room, get_room_by_id, is_leader, join_room,
+    kick, leave_room, member_ids, user_rooms,
 )
 
 LEADER = 111
@@ -163,6 +166,117 @@ def test_is_leader(conn):
     room = get_room(conn, make_room(conn))
     assert is_leader(room, LEADER)
     assert not is_leader(room, OTHER)
+
+
+def test_get_room_by_id(conn):
+    key = make_room(conn)
+    room = get_room(conn, key)
+    assert get_room_by_id(conn, room["id"])["key"] == key
+    assert get_room_by_id(conn, 12345) is None
+
+
+# 退出 / 踢人
+def add_pick(conn, room_id, user_id, start_at="2026-10-30 20:00"):
+    conn.execute("INSERT INTO availability (room_id, user_id, start_at) VALUES (?, ?, ?)", (room_id, user_id, start_at))
+    conn.commit()
+
+
+def picks(conn, room_id, user_id):
+    rows = conn.execute("SELECT start_at FROM availability WHERE room_id=? AND user_id=?", (room_id, user_id))
+    return [r["start_at"] for r in rows]
+
+
+def test_leave_room(conn):
+    room = join_room(conn, make_room(conn), OTHER)
+    other_room = join_room(conn, make_room(conn), OTHER)
+    add_pick(conn, room["id"], OTHER)
+    add_pick(conn, room["id"], LEADER)
+    add_pick(conn, other_room["id"], OTHER)
+    leave_room(conn, room["id"], OTHER)
+    assert member_ids(conn, room["id"]) == [LEADER]
+    assert picks(conn, room["id"], OTHER) == []                         # 他在這房間填的也刪掉
+    assert picks(conn, room["id"], LEADER) == ["2026-10-30 20:00"]      # 別人的不動
+    assert picks(conn, other_room["id"], OTHER) == ["2026-10-30 20:00"] # 別的房間不動
+
+
+def test_leader_cannot_leave(conn):
+    room = get_room(conn, make_room(conn))
+    with pytest.raises(ValueError):
+        leave_room(conn, room["id"], LEADER)
+    assert member_ids(conn, room["id"]) == [LEADER]
+
+
+def test_leave_not_member(conn):
+    room = get_room(conn, make_room(conn))
+    with pytest.raises(ValueError):
+        leave_room(conn, room["id"], OTHER)
+
+
+def test_leave_room_not_found(conn):
+    with pytest.raises(ValueError):
+        leave_room(conn, 12345, OTHER)
+
+
+def test_kick(conn):
+    room = join_room(conn, make_room(conn), OTHER)
+    add_pick(conn, room["id"], OTHER)
+    kick(conn, room["id"], LEADER, OTHER)
+    assert member_ids(conn, room["id"]) == [LEADER]
+    assert picks(conn, room["id"], OTHER) == []
+
+
+def test_non_leader_cannot_kick(conn):
+    key = make_room(conn)
+    join_room(conn, key, OTHER)
+    room = join_room(conn, key, 333)
+    with pytest.raises(ValueError):
+        kick(conn, room["id"], OTHER, 333)
+    assert member_ids(conn, room["id"]) == [LEADER, OTHER, 333]
+
+
+def test_cannot_kick_self(conn):
+    room = get_room(conn, make_room(conn))
+    with pytest.raises(ValueError):
+        kick(conn, room["id"], LEADER, LEADER)
+
+
+def test_kick_not_member(conn):
+    room = get_room(conn, make_room(conn))
+    with pytest.raises(ValueError):
+        kick(conn, room["id"], LEADER, OTHER)
+
+
+# 自動清理
+NOW = datetime(2026, 10, 30, 12, 0, tzinfo=TZ)
+
+
+def room_with(conn, created_at, decided_at=None):
+    room = get_room(conn, make_room(conn))
+    status = "decided" if decided_at else "open"
+    conn.execute(
+        "UPDATE rooms SET created_at=?, status=?, decided_at=? WHERE id=?",
+        (created_at, status, decided_at, room["id"]),
+    )
+    conn.commit()
+    return room["id"]
+
+
+def test_cleanup(conn):
+    old_decided = room_with(conn, "2026-10-28 10:00", "2026-10-29 11:59")   # 開打過了 24 小時又 1 分
+    new_decided = room_with(conn, "2026-10-20 10:00", "2026-10-29 13:00")   # 建很久，但開打才過 23 小時
+    old_open = room_with(conn, "2026-10-23 11:59")                         # 7 天又 1 分沒定案
+    new_open = room_with(conn, "2026-10-23 12:30")                         # 6 天多
+    future = room_with(conn, "2026-10-29 10:00", "2026-10-30 20:00")
+    assert cleanup(conn, NOW) == 2
+    left = {r["id"] for r in conn.execute("SELECT id FROM rooms")}
+    assert left == {new_decided, new_open, future}
+    assert member_ids(conn, old_decided) == []                             # CASCADE
+    assert member_ids(conn, old_open) == []
+
+
+def test_cleanup_nothing(conn):
+    room_with(conn, "2026-10-30 10:00")
+    assert cleanup(conn, NOW) == 0
 
 
 # 刪房間

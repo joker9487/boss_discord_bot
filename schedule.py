@@ -1,12 +1,11 @@
-from datetime import datetime, timedelta
-
-from rooms import TIME_FMT, is_leader, now_str
-from slots import DATE_FMT, all_start_times, start_times
+from reminders import add_reminders
+from rooms import get_room_by_id, is_leader, now_str
+from slots import all_start_times, night_of, start_times
 
 
 #用 id 找 room；找不到 → ValueError
 def _get_room(conn, room_id):
-    room = conn.execute("SELECT * FROM rooms WHERE id=?", (room_id,)).fetchone()
+    room = get_room_by_id(conn, room_id)
     if room is None:
         raise ValueError("房間不存在")
     return room
@@ -17,16 +16,13 @@ def _is_member(conn, room_id, user_id):
     return row is not None
 
 
-#start_at 是不是這個房間合法、還沒過去的開始時間；跨午夜的時間屬於前一晚，所以兩晚都查
+#start_at 是不是這個房間合法、還沒過去的開始時間
 def _is_valid_start(room, start_at, now):
     try:
-        day = datetime.strptime(start_at, TIME_FMT)
+        night = night_of(room, start_at)
     except (TypeError, ValueError):
         return False
-    for night in (day, day - timedelta(days=1)):
-        if start_at in start_times(room, night.strftime(DATE_FMT), now):
-            return True
-    return False
+    return night is not None and start_at in start_times(room, night, now)
 
 
 #填那一晚可以開始的時間；先刪掉這個人那一晚的全部時段再寫入（starts 空 list = 清掉那一晚）
@@ -83,7 +79,7 @@ def ranking(conn, room_id, top=5, now=None):
     return {"members": members, "slots": slots}
 
 
-#定案：只有隊長、只有 open、start_at 要是合法且還沒過去的時段
+#定案：只有隊長、只有 open、start_at 要是合法且還沒過去的時段；狀態和提醒同一次 commit
 def decide(conn, room_id, user_id, start_at, now=None):
     room = _get_room(conn, room_id)
     if not is_leader(room, user_id):
@@ -92,5 +88,10 @@ def decide(conn, room_id, user_id, start_at, now=None):
         raise ValueError("房間已經定案")
     if not _is_valid_start(room, start_at, now):
         raise ValueError(f"不能定案的時間：{start_at!r}")
-    conn.execute("UPDATE rooms SET status='decided', decided_at=? WHERE id=?", (start_at, room_id))
-    conn.commit()
+    try:
+        conn.execute("UPDATE rooms SET status='decided', decided_at=? WHERE id=?", (start_at, room_id))
+        add_reminders(conn, room, start_at, now)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
