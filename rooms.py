@@ -1,3 +1,4 @@
+import re
 import secrets
 import sqlite3
 import string
@@ -7,21 +8,43 @@ from zoneinfo import ZoneInfo
 
 
 TZ = ZoneInfo("Asia/Taipei")
+TIME_FMT = "%Y-%m-%d %H:%M"                            # 統一的時間格式
 KEY_CHARS = string.ascii_uppercase + string.digits     # A~Z + 0~9
 KEY_RETRY = 10                                         # key 最多重抽幾次
+MAX_RANGE = 12 * 60                                    # 開始時間範圍最長 12 小時（分鐘）
 
 
 def now_str():
-    return datetime.now(TZ).strftime("%Y-%m-%d %H:%M")   # 統一的時間格式
+    return datetime.now(TZ).strftime(TIME_FMT)
 
 
 def generate_key(length=6):
     return "".join(secrets.choice(KEY_CHARS) for _ in range(length))
 
 
+#"HH:MM" → 從 00:00 起算幾分鐘；格式錯或分鐘不是 00 / 30 → ValueError
+def parse_hhmm(s):
+    if not isinstance(s, str) or not re.fullmatch(r"\d{2}:\d{2}", s):
+        raise ValueError(f"時間格式要是 HH:MM：{s!r}")
+    hour, minute = int(s[:2]), int(s[3:])
+    if hour > 23 or minute not in (0, 30):
+        raise ValueError(f"時間要是整點或半點：{s!r}")
+    return hour * 60 + minute
+
+
+#範圍有幾分鐘；end <= start 代表跨午夜
+def range_length(range_start, range_end):
+    start, end = parse_hhmm(range_start), parse_hhmm(range_end)
+    if end <= start:
+        end += 24 * 60
+    return end - start
+
+
 def create_room(conn, name, leader_id, channel_id, duration, range_start, range_end):
     if not 1<= duration<=3:
          raise ValueError("時長要 1～3 小時")
+    if range_length(range_start, range_end) > MAX_RANGE:
+        raise ValueError("開始時間範圍最長 12 小時")
 
     for attempt in range(KEY_RETRY):
         key = generate_key()
