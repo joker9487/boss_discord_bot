@@ -1,0 +1,120 @@
+import sqlite3
+
+import pytest
+
+import rooms
+from rooms import KEY_CHARS, KEY_RETRY, create_room, delete_room, get_room, is_leader, join_room
+
+LEADER = 111
+OTHER = 222
+CHANNEL = 999
+
+
+def make_room(conn, duration=2):
+    return create_room(conn, "週五打王", LEADER, CHANNEL, duration, "18:00", "02:00")
+
+
+def member_ids(conn, room_id):
+    rows = conn.execute("SELECT user_id FROM members WHERE room_id=?", (room_id,))
+    return [r["user_id"] for r in rows]
+
+
+# 建房
+def test_create_room_key_6_chars(conn):
+    key = make_room(conn)
+    assert len(key) == 6
+    assert all(c in KEY_CHARS for c in key)
+
+
+def test_create_room_saved(conn):
+    key = make_room(conn)
+    room = get_room(conn, key)
+    assert room["name"] == "週五打王"
+    assert room["leader_id"] == LEADER
+    assert room["status"] == "open"
+
+
+def test_create_room_leader_is_member(conn):
+    room = get_room(conn, make_room(conn))
+    assert member_ids(conn, room["id"]) == [LEADER]
+
+
+# key 撞到重抽
+def test_key_collision_retries(conn, monkeypatch):
+    keys = iter(["AAAAAA", "AAAAAA", "BBBBBB"])
+    monkeypatch.setattr(rooms, "generate_key", lambda: next(keys))
+    assert make_room(conn) == "AAAAAA"
+    assert make_room(conn) == "BBBBBB"   # 第二次先撞到 AAAAAA，重抽成 BBBBBB
+
+
+def test_key_collision_gives_up(conn, monkeypatch):
+    calls = []
+    def same_key():
+        calls.append(1)
+        return "AAAAAA"
+    monkeypatch.setattr(rooms, "generate_key", same_key)
+    make_room(conn)
+    calls.clear()
+    with pytest.raises(sqlite3.IntegrityError):
+        make_room(conn)
+    assert len(calls) == KEY_RETRY
+
+
+def test_other_integrity_error_not_retried(conn, monkeypatch):
+    calls = []
+    def counting_key():
+        calls.append(1)
+        return f"K{len(calls):05d}"
+    monkeypatch.setattr(rooms, "generate_key", counting_key)
+    with pytest.raises(sqlite3.IntegrityError):
+        create_room(conn, None, LEADER, CHANNEL, 2, "18:00", "02:00")   # name 是 NOT NULL
+    assert len(calls) == 1
+
+
+# 時長
+@pytest.mark.parametrize("duration", [1, 2, 3])
+def test_duration_ok(conn, duration):
+    assert get_room(conn, make_room(conn, duration))["duration"] == duration
+
+
+@pytest.mark.parametrize("duration", [0, 4, -1])
+def test_duration_out_of_range(conn, duration):
+    with pytest.raises(ValueError):
+        make_room(conn, duration)
+    assert conn.execute("SELECT COUNT(*) FROM rooms").fetchone()[0] == 0
+
+
+# 加入
+def test_join_room(conn):
+    key = make_room(conn)
+    room = join_room(conn, key, OTHER)
+    assert room["key"] == key
+    assert sorted(member_ids(conn, room["id"])) == [LEADER, OTHER]
+
+
+def test_join_unknown_key(conn):
+    make_room(conn)
+    assert join_room(conn, "NOPE00", OTHER) is None
+
+
+def test_join_twice_counts_once(conn):
+    key = make_room(conn)
+    join_room(conn, key, OTHER)
+    room = join_room(conn, key, OTHER)
+    assert member_ids(conn, room["id"]).count(OTHER) == 1
+
+
+# 權限
+def test_is_leader(conn):
+    room = get_room(conn, make_room(conn))
+    assert is_leader(room, LEADER)
+    assert not is_leader(room, OTHER)
+
+
+# 刪房間
+def test_delete_room_cascades_members(conn):
+    key = make_room(conn)
+    room = join_room(conn, key, OTHER)
+    delete_room(conn, room["id"])
+    assert get_room(conn, key) is None
+    assert member_ids(conn, room["id"]) == []
