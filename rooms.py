@@ -35,6 +35,14 @@ def parse_hhmm(s):
     return hour * 60 + minute
 
 
+#建房輸入框的 "1830" → "18:30"；不是 4 位數字 → ValueError（整點半點交給 parse_hhmm 檢查）
+def digits_to_hhmm(s):
+    s = s.strip()
+    if not re.fullmatch(r"\d{4}", s):
+        raise ValueError(f"時間要是 4 位數字，例如 1800：{s!r}")
+    return f"{s[:2]}:{s[2:]}"
+
+
 #範圍有幾分鐘；end <= start 代表跨午夜
 def range_length(range_start, range_end):
     start, end = parse_hhmm(range_start), parse_hhmm(range_end)
