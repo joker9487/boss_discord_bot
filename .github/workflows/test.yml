@@ -20,3 +20,12 @@ jobs:
 
       - name: Run tests
         run: pytest
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # 只確認 image 建得起來；不跑容器（CI 沒有 DISCORD_TOKEN）
+      - name: Build image
+        run: docker build -t boss_discord_bot .

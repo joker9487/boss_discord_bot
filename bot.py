@@ -21,7 +21,7 @@ load_dotenv()                                    # 讀env
 TOKEN = os.environ["DISCORD_TOKEN"]
 GUILD = discord.Object(id=int(os.environ["GUILD_ID"]))
 
-conn = connect("boss.db")                        # 整個 bot 共用一條連線
+conn = connect(os.getenv("DB_PATH", "boss.db"))  # 整個 bot 共用一條連線；Docker 裡指到 volume
 init_db(conn)
 
 NO_PING = discord.AllowedMentions.none()         # 顯示 <@id> 但不通知
