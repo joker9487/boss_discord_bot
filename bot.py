@@ -16,7 +16,7 @@ from rooms import (
     TIME_FMT, TZ, cleanup, create_room, delete_room, get_room, get_room_by_id, is_leader, join_room, kick,
     leave_room, member_ids, user_rooms,
 )
-from schedule import decide, get_availability, ranking, set_availability
+from schedule import decide, delay, get_availability, ranking, reschedule, set_availability
 from slots import DATE_FMT, night_options, slot_label, start_times
 
 load_dotenv()                                    # 讀env
@@ -375,6 +375,116 @@ def result_step(room, user_id):
 async def result(interaction: discord.Interaction):
     rooms = user_rooms(conn, interaction.user.id)
     await with_room(interaction, rooms, result_step, "你還沒加入任何房間")
+
+
+# ---------- 定案後：/晚到、/延後、/改期 ----------
+
+#選一個選項 → action(interaction, room, value)；room 不在了直接回
+class OptionSelect(discord.ui.Select):
+    def __init__(self, key, placeholder, choices, action):
+        options = [discord.SelectOption(label=label, value=value) for label, value in choices]
+        super().__init__(placeholder=placeholder, options=options)
+        self.key = key
+        self.action = action
+
+    async def callback(self, interaction):
+        room = get_room(conn, self.key)
+        if room is None:
+            await show(interaction, "這個房間已經不在了")
+            return
+        await self.action(interaction, room, self.values[0])
+
+
+def option_view(room, placeholder, choices, action):
+    view = new_view()
+    view.add_item(OptionSelect(room["key"], placeholder, choices, action))
+    return view
+
+
+LATE_CHOICES = [("晚 10 分鐘", "10"), ("晚 15 分鐘", "15"), ("晚 30 分鐘", "30"), ("晚 60 分鐘", "60"), ("今天不能來", "absent")]
+DELAY_CHOICES = [("延後 15 分鐘", "15"), ("延後 30 分鐘", "30"), ("延後 60 分鐘", "60")]
+
+
+async def late_action(interaction, room, value):
+    user_id = interaction.user.id
+    if room["status"] != "decided" or user_id not in member_ids(conn, room["id"]):
+        await show(interaction, f"「{room['name']}」已經不是定案狀態，或你不在房間裡了")
+        return
+    what = "今天不能來" if value == "absent" else f"會晚 {value} 分鐘"
+    text = f"⚠️ <@{user_id}> {what}（「{room['name']}」{slot_text(room['decided_at'], room['duration'])}）"
+    await show(interaction, f"已通知「{room['name']}」全房：你{what}")      # 先回應（3 秒限制），再一個一個私訊
+    for m in member_ids(conn, room["id"]):
+        extra = "\n可以用 /延後 或 /改期" if is_leader(room, m) else ""
+        await notify(room, m, text + extra)
+
+
+def late_step(room, user_id):
+    view = option_view(room, "選晚多久", LATE_CHOICES, late_action)
+    return f"「{room['name']}」{slot_text(room['decided_at'], room['duration'])}：你會晚多久？", view
+
+
+@bot.tree.command(name="晚到", description="通知全房你會晚到或不能來")
+@dm_ok
+async def late(interaction: discord.Interaction):
+    rooms = [r for r in user_rooms(conn, interaction.user.id) if r["status"] == "decided"]
+    await with_room(interaction, rooms, late_step, "你沒有已定案的房間")
+
+
+async def delay_action(interaction, room, value):
+    try:
+        new_start = delay(conn, room["id"], interaction.user.id, int(value), datetime.now(TZ))
+    except ValueError as e:
+        await show(interaction, f"延後失敗：{e}")
+        return
+    text = f"⏩「{room['name']}」延後 {value} 分鐘，新的時間：{slot_text(new_start, room['duration'])}"
+    await show(interaction, text)
+    await post_channel(room, text)
+    for m in member_ids(conn, room["id"]):
+        await notify(room, m, text)
+
+
+def delay_step(room, user_id):
+    view = option_view(room, "選延後多久", DELAY_CHOICES, delay_action)
+    return f"「{room['name']}」{slot_text(room['decided_at'], room['duration'])}：要延後多久？", view
+
+
+@bot.tree.command(name="延後", description="隊長把定案時間往後延")
+@dm_ok
+async def postpone(interaction: discord.Interaction):
+    rooms = [r for r in user_rooms(conn, interaction.user.id)
+             if is_leader(r, interaction.user.id) and r["status"] == "decided"]
+    await with_room(interaction, rooms, delay_step, "你沒有已定案、你是隊長的房間")
+
+
+def reschedule_step(room, user_id):
+    key = room["key"]
+
+    async def action(interaction):
+        room = get_room(conn, key)
+        if room is None:
+            await show(interaction, "這個房間已經不在了")
+            return
+        try:
+            reschedule(conn, room["id"], interaction.user.id)
+        except ValueError as e:
+            await show(interaction, f"改期失敗：{e}")
+            return
+        text = f"🔄「{room['name']}」改期了：定案取消，大家填過的時間還在，可以用 /填時間 修改、/結果 重新看"
+        await show(interaction, text)
+        await post_channel(room, text)
+        for m in member_ids(conn, room["id"]):
+            await notify(room, m, text)
+
+    return (f"確定要改期「{room['name']}」？定案（{slot_text(room['decided_at'], room['duration'])}）和提醒會取消，"
+            f"填過的時間保留"), confirm_view("確定改期", action)
+
+
+@bot.tree.command(name="改期", description="隊長取消定案，重新選時間")
+@dm_ok
+async def change_date(interaction: discord.Interaction):
+    rooms = [r for r in user_rooms(conn, interaction.user.id)
+             if is_leader(r, interaction.user.id) and r["status"] == "decided"]
+    await with_room(interaction, rooms, reschedule_step, "你沒有已定案、你是隊長的房間")
 
 
 # ---------- 管理：/退出、/踢人、/關房、/我的房間 ----------

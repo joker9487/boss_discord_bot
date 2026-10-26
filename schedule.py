@@ -1,5 +1,7 @@
-from reminders import add_reminders
-from rooms import get_room_by_id, is_leader, now_str
+from datetime import datetime, timedelta
+
+from reminders import add_reminders, clear_reminders, reset_before
+from rooms import TIME_FMT, get_room_by_id, is_leader, now_str
 from slots import all_start_times, night_of, start_times
 
 
@@ -91,6 +93,44 @@ def decide(conn, room_id, user_id, start_at, now=None):
     try:
         conn.execute("UPDATE rooms SET status='decided', decided_at=? WHERE id=?", (start_at, room_id))
         add_reminders(conn, room, start_at, now)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
+#已定案的房間給隊長操作（延後、改期）；不是隊長、還沒定案 → ValueError
+def _decided_room_of_leader(conn, room_id, leader_id):
+    room = _get_room(conn, room_id)
+    if not is_leader(room, leader_id):
+        raise ValueError("只有隊長能操作")
+    if room["status"] != "decided":
+        raise ValueError("房間還沒定案")
+    return room
+
+
+#延後：decided_at += minutes；before 提醒用新時間重寫，day 不動；回傳新的開打時間
+def delay(conn, room_id, leader_id, minutes, now=None):
+    room = _decided_room_of_leader(conn, room_id, leader_id)
+    if not isinstance(minutes, int) or minutes <= 0:
+        raise ValueError("延後的分鐘數要是正整數")
+    new_start = (datetime.strptime(room["decided_at"], TIME_FMT) + timedelta(minutes=minutes)).strftime(TIME_FMT)
+    try:
+        conn.execute("UPDATE rooms SET decided_at=? WHERE id=?", (new_start, room_id))
+        reset_before(conn, room_id, new_start, now)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return new_start
+
+
+#改期：狀態改回 open、清掉定案時間和所有提醒；大家填過的時間保留
+def reschedule(conn, room_id, leader_id):
+    _decided_room_of_leader(conn, room_id, leader_id)
+    try:
+        conn.execute("UPDATE rooms SET status='open', decided_at=NULL WHERE id=?", (room_id,))
+        clear_reminders(conn, room_id)
         conn.commit()
     except Exception:
         conn.rollback()

@@ -23,6 +23,19 @@ def add_reminders(conn, room, start_at, now=None):
     conn.executemany("INSERT INTO reminders (room_id, remind_at, kind) VALUES (?, ?, ?)", rows)
 
 
+#延後用：刪掉還沒發的 before，用新的開打時間重寫一筆（已經過去就不寫）；day 不動。不 commit
+def reset_before(conn, room_id, start_at, now=None):
+    conn.execute("DELETE FROM reminders WHERE room_id=? AND kind='before' AND sent=0", (room_id,))
+    remind_at = (datetime.strptime(start_at, TIME_FMT) - timedelta(minutes=BEFORE)).strftime(TIME_FMT)
+    if remind_at >= now_str(now):
+        conn.execute("INSERT INTO reminders (room_id, remind_at, kind) VALUES (?, ?, 'before')", (room_id, remind_at))
+
+
+#改期用：刪掉這個房間所有提醒。不 commit
+def clear_reminders(conn, room_id):
+    conn.execute("DELETE FROM reminders WHERE room_id=?", (room_id,))
+
+
 #到期該發的提醒（附 start_at = 開打時間）；開打時間已經過了的（例如 bot 關機錯過）直接標 sent，不回傳
 def due_reminders(conn, now=None):
     now_s = now_str(now)
