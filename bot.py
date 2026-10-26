@@ -1,3 +1,4 @@
+import inspect
 import os
 import traceback
 from datetime import datetime
@@ -37,10 +38,11 @@ class Bot(discord.Client):
     async def setup_hook(self):
         # 公告的「加入」、結果的「定案」按鈕：bot 重開後還能按
         self.add_dynamic_items(JoinButton, DecideButton)
-        # 連上 Discord 前跑一次：把指令同步到白名單的每個伺服器
+        # 連上 Discord 前跑一次：全域指令（伺服器 + 私訊）同步一次；
+        # 每個白名單伺服器只放 /建房（不用 copy_global_to，不然伺服器裡會有兩份；舊的複製版會被這次覆蓋掉）
+        await self.tree.sync()
         for guild_id in GUILD_IDS:
             guild = discord.Object(id=guild_id)
-            self.tree.copy_global_to(guild=guild)
             try:
                 await self.tree.sync(guild=guild)
             except discord.HTTPException as e:       # bot 還沒加入這個伺服器等 → 跳過，不影響其他
@@ -49,6 +51,12 @@ class Bot(discord.Client):
 
 
 bot = Bot()
+
+
+#全域指令：伺服器和私訊都能用；只能裝在伺服器（不開放個人安裝）
+def dm_ok(func):
+    func = app_commands.allowed_contexts(guilds=True, dms=True, private_channels=False)(func)
+    return app_commands.allowed_installs(guilds=True, users=False)(func)
 
 
 # ---------- 顯示 ----------
@@ -104,10 +112,14 @@ async def post_channel(room, text, allowed_mentions=NO_PING):
 
 
 #私訊；失敗（HTTPException，含對方關掉私訊的 Forbidden）→ 改在房間頻道 @ 他；不會丟出去，一個人失敗不影響其他人
-async def notify(room, user_id, text):
+#hint=True：私訊結尾提示可以直接在私訊打指令（改發到頻道時不加）
+DM_HINT = "\n可以直接在這裡打 /填時間、/結果"
+
+
+async def notify(room, user_id, text, hint=False):
     try:
         user = await bot.fetch_user(user_id)
-        await user.send(text, allowed_mentions=NO_PING)
+        await user.send(text + (DM_HINT if hint else ""), allowed_mentions=NO_PING)
     except discord.HTTPException:
         await post_channel(
             room, f"<@{user_id}> {text}", discord.AllowedMentions(users=[discord.Object(id=user_id)]),
@@ -130,7 +142,13 @@ class RoomSelect(discord.ui.Select):
         if room is None:
             await show(interaction, "這個房間已經不在了")
             return
-        await show(interaction, *self.step(room, interaction.user.id))
+        await show(interaction, *await run_step(self.step, room, interaction.user.id))
+
+
+#step 可以是一般函式或 async（/踢人 要查名字）
+async def run_step(step, room, user_id):
+    result = step(room, user_id)
+    return await result if inspect.isawaitable(result) else result
 
 
 #只有一個房間 → 直接下一步；多個 → 先選房間
@@ -138,7 +156,7 @@ async def with_room(interaction, rooms, step, empty_text):
     if not rooms:
         await show(interaction, empty_text)
     elif len(rooms) == 1:
-        await show(interaction, *step(rooms[0], interaction.user.id))
+        await show(interaction, *await run_step(step, rooms[0], interaction.user.id))
     else:
         view = new_view()
         view.add_item(RoomSelect(rooms, step))
@@ -186,7 +204,8 @@ class CreateRoomModal(discord.ui.Modal, title="建房"):
         await interaction.channel.send(f"📢 新的打王房間\n{room_info(room)}", view=view, allowed_mentions=NO_PING)
 
 
-@bot.tree.command(name="建房", description="建立打王房間")
+#只登記在白名單伺服器：公告要貼在建房的頻道
+@bot.tree.command(name="建房", description="建立打王房間", guilds=[discord.Object(id=g) for g in GUILD_IDS])
 async def create(interaction: discord.Interaction):
     await interaction.response.send_modal(CreateRoomModal())
 
@@ -205,7 +224,7 @@ async def do_join(interaction, key):
 
     join_room(conn, key, interaction.user.id)
     await interaction.response.send_message(f"已加入「{room['name']}」，用 /填時間 填可以的時間", ephemeral=True)
-    await notify(room, interaction.user.id, f"你加入了打王房間\n{room_info(room)}\n用 /填時間 填可以的時間")
+    await notify(room, interaction.user.id, f"你加入了打王房間\n{room_info(room)}\n用 /填時間 填可以的時間", hint=True)
 
 
 class JoinButton(discord.ui.DynamicItem[discord.ui.Button], template=r"join:(?P<key>[A-Z0-9]{6})"):
@@ -223,6 +242,7 @@ class JoinButton(discord.ui.DynamicItem[discord.ui.Button], template=r"join:(?P<
 
 @bot.tree.command(name="加入", description="用 key 加入打王房間")
 @app_commands.describe(key="房間的 6 碼 key")
+@dm_ok
 async def join(interaction: discord.Interaction, key: str):
     await do_join(interaction, key)
 
@@ -288,6 +308,7 @@ def times_step(room, night, user_id):
 
 
 @bot.tree.command(name="填時間", description="填你可以開始的時間")
+@dm_ok
 async def fill(interaction: discord.Interaction):
     rooms = [r for r in user_rooms(conn, interaction.user.id) if r["status"] == "open"]
     await with_room(interaction, rooms, night_step, "你沒有還沒定案的房間")
@@ -326,7 +347,7 @@ class DecideButton(discord.ui.DynamicItem[discord.ui.Button], template=r"decide:
         text = f"🎯「{room['name']}」定案：{when}（隊長 <@{room['leader_id']}>）"
         await post_channel(room, text)
         for user_id in member_ids(conn, room["id"]):
-            await notify(room, user_id, text)
+            await notify(room, user_id, text, hint=True)
 
 
 def result_step(room, user_id):
@@ -350,6 +371,7 @@ def result_step(room, user_id):
 
 
 @bot.tree.command(name="結果", description="看大家可以的時間（隊長可以定案）")
+@dm_ok
 async def result(interaction: discord.Interaction):
     rooms = user_rooms(conn, interaction.user.id)
     await with_room(interaction, rooms, result_step, "你還沒加入任何房間")
@@ -392,14 +414,17 @@ def leave_step(room, user_id):
 
 
 @bot.tree.command(name="退出", description="退出房間（隊長不能退出，請用 /關房）")
+@dm_ok
 async def leave(interaction: discord.Interaction):
     rooms = [r for r in user_rooms(conn, interaction.user.id) if not is_leader(r, interaction.user.id)]
     await with_room(interaction, rooms, leave_step, "你沒有可以退出的房間（隊長不能退出）")
 
 
-class KickSelect(discord.ui.UserSelect):
-    def __init__(self, key):
-        super().__init__(placeholder="選要踢的人")
+#列房間成員（不用 UserSelect：私訊裡它只選得到私訊裡的人）
+class KickSelect(discord.ui.Select):
+    def __init__(self, key, members):
+        options = [discord.SelectOption(label=name[:100], value=str(uid)) for uid, name in members[:25]]
+        super().__init__(placeholder="選要踢的人", options=options)
         self.key = key
 
     async def callback(self, interaction):
@@ -407,25 +432,36 @@ class KickSelect(discord.ui.UserSelect):
         if room is None:
             await show(interaction, "這個房間已經不在了")
             return
-        target = self.values[0]
+        target_id = int(self.values[0])
         try:
-            kick(conn, room["id"], interaction.user.id, target.id)
+            kick(conn, room["id"], interaction.user.id, target_id)
         except ValueError as e:
             await show(interaction, f"踢人失敗：{e}，請重選", self.view)
             return
-        await show(interaction, f"已把 <@{target.id}> 移出「{room['name']}」")
-        await notify(room, target.id, f"你被隊長移出了「{room['name']}」")
+        await show(interaction, f"已把 <@{target_id}> 移出「{room['name']}」")
+        await notify(room, target_id, f"你被隊長移出了「{room['name']}」")
 
 
-def kick_step(room, user_id):
-    if len(member_ids(conn, room["id"])) <= 1:
+async def display_name(user_id):
+    try:
+        user = bot.get_user(user_id) or await bot.fetch_user(user_id)
+        return user.display_name
+    except discord.HTTPException:
+        return str(user_id)
+
+
+async def kick_step(room, user_id):
+    others = [m for m in member_ids(conn, room["id"]) if m != user_id]
+    if not others:
         return f"「{room['name']}」除了你沒有其他成員", None
+    members = [(m, await display_name(m)) for m in others]
     view = new_view()
-    view.add_item(KickSelect(room["key"]))
+    view.add_item(KickSelect(room["key"], members))
     return f"「{room['name']}」要踢誰？", view
 
 
 @bot.tree.command(name="踢人", description="隊長把人移出房間")
+@dm_ok
 async def kick_member(interaction: discord.Interaction):
     rooms = [r for r in user_rooms(conn, interaction.user.id) if is_leader(r, interaction.user.id)]
     await with_room(interaction, rooms, kick_step, "你不是任何房間的隊長")
@@ -452,12 +488,14 @@ def close_step(room, user_id):
 
 
 @bot.tree.command(name="關房", description="隊長關閉房間")
+@dm_ok
 async def close(interaction: discord.Interaction):
     rooms = [r for r in user_rooms(conn, interaction.user.id) if is_leader(r, interaction.user.id)]
     await with_room(interaction, rooms, close_step, "你不是任何房間的隊長")
 
 
 @bot.tree.command(name="我的房間", description="列出你在的房間")
+@dm_ok
 async def my_rooms(interaction: discord.Interaction):
     rooms = user_rooms(conn, interaction.user.id)
     if not rooms:
@@ -484,7 +522,7 @@ async def every_minute():
             room = get_room_by_id(conn, r["room_id"])
             text = f"{REMIND_PREFIX[r['kind']]}：「{room['name']}」{slot_text(r['start_at'], room['duration'])}"
             for user_id in member_ids(conn, room["id"]):
-                await notify(room, user_id, text)
+                await notify(room, user_id, text, hint=True)
             mark_sent(conn, r["id"])
         deleted = cleanup(conn, now)
         if deleted:
@@ -501,11 +539,13 @@ async def before_every_minute():
 # ---------- 其他 ----------
 
 @bot.tree.command(description="測試 bot 有沒有活著")
+@dm_ok
 async def ping(interaction: discord.Interaction):
     ms = round(bot.latency * 1000)
     await interaction.response.send_message(f"pong！延遲 {ms} ms")
 
 @bot.tree.command(description="打招呼")
+@dm_ok
 async def hello(interaction: discord.Interaction):
     await interaction.response.send_message(f"Hello!{interaction.user.display_name}")
 
