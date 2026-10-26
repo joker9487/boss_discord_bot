@@ -9,6 +9,7 @@ from discord.utils import MISSING
 from dotenv import load_dotenv
 
 from db import connect, init_db
+from guilds import parse_guild_ids
 from reminders import BEFORE, due_reminders, mark_sent
 from rooms import (
     TIME_FMT, TZ, cleanup, create_room, delete_room, get_room, get_room_by_id, is_leader, join_room, kick,
@@ -19,7 +20,7 @@ from slots import DATE_FMT, night_options, slot_label, start_times
 
 load_dotenv()                                    # 讀env
 TOKEN = os.environ["DISCORD_TOKEN"]
-GUILD = discord.Object(id=int(os.environ["GUILD_ID"]))
+GUILD_IDS = parse_guild_ids(os.environ["GUILD_IDS"])   # 白名單：只服務這些伺服器
 
 conn = connect(os.getenv("DB_PATH", "boss.db"))  # 整個 bot 共用一條連線；Docker 裡指到 volume
 init_db(conn)
@@ -36,9 +37,14 @@ class Bot(discord.Client):
     async def setup_hook(self):
         # 公告的「加入」、結果的「定案」按鈕：bot 重開後還能按
         self.add_dynamic_items(JoinButton, DecideButton)
-        # 連上 Discord 前跑一次：把指令同步到測試伺服器
-        self.tree.copy_global_to(guild=GUILD)
-        await self.tree.sync(guild=GUILD)
+        # 連上 Discord 前跑一次：把指令同步到白名單的每個伺服器
+        for guild_id in GUILD_IDS:
+            guild = discord.Object(id=guild_id)
+            self.tree.copy_global_to(guild=guild)
+            try:
+                await self.tree.sync(guild=guild)
+            except discord.HTTPException as e:       # bot 還沒加入這個伺服器等 → 跳過，不影響其他
+                print(f"伺服器 {guild_id} 同步指令失敗：{e}")
         every_minute.start()                         # 每分鐘：發提醒、自動清理
 
 
@@ -503,9 +509,23 @@ async def ping(interaction: discord.Interaction):
 async def hello(interaction: discord.Interaction):
     await interaction.response.send_message(f"Hello!{interaction.user.display_name}")
 
+async def leave_if_not_allowed(guild):
+    if guild.id not in GUILD_IDS:
+        print(f"不在白名單，退出伺服器：{guild.name}（{guild.id}）")
+        await guild.leave()
+
+
+@bot.event
+async def on_guild_join(guild):
+    await leave_if_not_allowed(guild)
+
+
 @bot.event
 async def on_ready():
     print(f"已登入：{bot.user}")
+    # 關機期間被加進去的伺服器也要退出
+    for guild in bot.guilds:
+        await leave_if_not_allowed(guild)
 
 
 if __name__ == "__main__":

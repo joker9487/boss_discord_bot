@@ -50,6 +50,7 @@ rooms ─┬─< members
 ```
 ├── bot.py          # Discord 層：只收指令、顯示；資料庫 boss.db（啟動時自動建表）
 ├── db.py           # 建表、連線
+├── guilds.py       # 解析 GUILD_IDS 白名單
 ├── rooms.py        # 建房（含範圍檢查）、key、加入、退出、踢人、權限、關房、自動清理
 ├── slots.py        # 可選的日期、那一晚的開始時間（30 分、跨日、過去的不列）、時段顯示
 ├── schedule.py     # 填寫 / 覆蓋、整合排序、定案
@@ -71,12 +72,15 @@ pip install -r requirements.txt
 
 ```
 DISCORD_TOKEN=你的 bot token
-GUILD_ID=測試伺服器 ID
+GUILD_IDS=伺服器ID1,伺服器ID2
 ```
 
 - `.env` 格式是 `KEY=value`，不用加引號，`=` 兩邊不要有空格
 - `DISCORD_TOKEN`：Developer Portal → Bot 頁 → Reset Token（不是 OAuth2 頁的 Client Secret）
-- `GUILD_ID`：Discord 開「開發者模式」→ 對伺服器按右鍵 → 複製伺服器 ID。斜線指令只同步到這個伺服器，同步完馬上生效
+- `GUILD_IDS`：白名單，逗號分隔一個或多個伺服器 ID。Discord 開「開發者模式」→ 對伺服器按右鍵 → 複製伺服器 ID
+  - 啟動時把斜線指令同步到每個白名單伺服器，同步完馬上生效；bot 還沒加入的伺服器會印一行「同步指令失敗」並跳過
+  - bot 被邀進不在白名單的伺服器會自動退出（啟動時也會檢查一次），並印一行紀錄
+  - 新增伺服器：把 ID 加進 `GUILD_IDS` → 重開 bot（Docker 用 `docker compose up -d`）→ 再邀請 bot。順序反過來的話，bot 會先被自動踢出去
 - 邀請 bot：OAuth2 URL 勾 scope `bot` + `applications.commands`，permissions `3072`（View Channels + Send Messages）
 
 ## 跑 bot
