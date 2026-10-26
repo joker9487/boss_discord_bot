@@ -6,7 +6,7 @@ import rooms
 from datetime import datetime
 
 from rooms import (
-    KEY_CHARS, KEY_RETRY, TZ, cleanup, create_room, delete_room, get_room, get_room_by_id, is_leader, join_room,
+    KEY_CHARS, KEY_RETRY, TZ, cleanup, create_room, delete_room, digits_to_hhmm, get_room, get_room_by_id, is_leader, join_room,
     kick, leave_room, member_ids, user_rooms,
 )
 
@@ -286,3 +286,15 @@ def test_delete_room_cascades_members(conn):
     delete_room(conn, room["id"])
     assert get_room(conn, key) is None
     assert member_ids(conn, room["id"]) == []
+
+
+# 建房輸入框 HHMM → HH:MM
+@pytest.mark.parametrize("text, expected", [("1800", "18:00"), ("0230", "02:30"), (" 2100 ", "21:00")])
+def test_digits_to_hhmm(text, expected):
+    assert digits_to_hhmm(text) == expected
+
+
+@pytest.mark.parametrize("bad", ["", "180", "18000", "18:00", "18 0", "abcd"])
+def test_digits_to_hhmm_bad(bad):
+    with pytest.raises(ValueError):
+        digits_to_hhmm(bad)

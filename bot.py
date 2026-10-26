@@ -13,7 +13,7 @@ from db import connect, init_db
 from guilds import parse_guild_ids
 from reminders import BEFORE, due_reminders, mark_sent
 from rooms import (
-    TIME_FMT, TZ, cleanup, create_room, delete_room, get_room, get_room_by_id, is_leader, join_room, kick,
+    TIME_FMT, TZ, cleanup, create_room, delete_room, digits_to_hhmm, get_room, get_room_by_id, is_leader, join_room, kick,
     leave_room, member_ids, user_rooms,
 )
 from schedule import decide, delay, get_availability, ranking, reschedule, set_availability
@@ -172,12 +172,12 @@ class CreateRoomModal(discord.ui.Modal, title="建房"):
         component=discord.ui.TextInput(placeholder="2", max_length=1),
     )
     range_start = discord.ui.Label(
-        text="最早開始（HH:MM）", description="整點或半點",
-        component=discord.ui.TextInput(placeholder="18:00", min_length=5, max_length=5),
+        text="最早開始（HHMM）", description="4 位數字，例如 1800；整點或半點",
+        component=discord.ui.TextInput(placeholder="1800", min_length=4, max_length=4),
     )
     range_end = discord.ui.Label(
-        text="最晚開始（HH:MM）", description="比最早開始小代表跨午夜，範圍最長 12 小時",
-        component=discord.ui.TextInput(placeholder="02:00", min_length=5, max_length=5),
+        text="最晚開始（HHMM）", description="4 位數字，例如 0200；比最早開始小代表跨午夜，範圍最長 12 小時",
+        component=discord.ui.TextInput(placeholder="0200", min_length=4, max_length=4),
     )
 
     def __init__(self):
@@ -191,7 +191,8 @@ class CreateRoomModal(discord.ui.Modal, title="建房"):
                 raise ValueError("時長要是 1～3 的整數")
             key = create_room(
                 conn, self.name.component.value.strip(), interaction.user.id, interaction.channel_id,
-                duration, self.range_start.component.value, self.range_end.component.value,
+                duration,
+                digits_to_hhmm(self.range_start.component.value), digits_to_hhmm(self.range_end.component.value),
             )
         except ValueError as e:
             await interaction.response.send_message(f"建房失敗：{e}", ephemeral=True)
