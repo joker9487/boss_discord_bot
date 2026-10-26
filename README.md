@@ -93,4 +93,19 @@ python bot.py
 pytest
 ```
 
-測試用 `connect(":memory:")`，不會碰到真的資料庫檔。push 和 PR 時 GitHub Actions 會在 ubuntu + Python 3.13 自動跑一次（`.github/workflows/test.yml`）。
+測試用 `connect(":memory:")`，不會碰到真的資料庫檔。push 和 PR 時 GitHub Actions 會在 ubuntu + Python 3.13 自動跑一次（`.github/workflows/test.yml`），另外會 build 一次 Docker image 確認建得起來（不會跑起來，CI 沒有 token）。
+
+## 用 Docker 跑
+
+需要 Docker Desktop。`.env` 照上面「設定」建好，在專案根目錄：
+
+```powershell
+docker compose up -d --build   # 建 image 並在背景啟動
+docker compose logs -f         # 看 log（看到「已登入」就是連上了），Ctrl+C 只是離開 log
+docker compose down            # 停止並移除容器
+```
+
+- 改了程式碼要重建 image 才會生效：`docker compose up -d --build`（只改程式不會重裝套件，有快取）
+- 資料庫在 `./data/boss.db`（掛進容器的 `/app/data`），`down` 再 `up` 房間都還在；`data/` 已在 `.gitignore`
+- 容器時區是 Asia/Taipei；bot 掛掉、或 Docker Desktop 重新啟動後，會自動把它重啟（`restart: unless-stopped`），要停就用 `down`
+- 不要同時用 `python bot.py` 和 Docker 跑，同一個 token 會有兩個 bot 搶著回應
