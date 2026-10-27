@@ -16,8 +16,10 @@ from rooms import (
     TIME_FMT, TZ, cleanup, create_room, delete_room, digits_to_hhmm, get_room, get_room_by_id, is_leader, join_room, kick,
     leave_room, member_ids, user_rooms,
 )
-from schedule import decide, delay, get_availability, ranking, reschedule, set_availability
-from slots import DATE_FMT, night_options, slot_label, start_times
+from schedule import (
+    common_availability, decide, delay, ranking, reschedule, set_availability_nights, unfilled_members,
+)
+from slots import DATE_FMT, night_options, slot_label, start_times, times_of_day
 
 load_dotenv()                                    # 讀env
 TOKEN = os.environ["DISCORD_TOKEN"]
@@ -220,7 +222,7 @@ async def do_join(interaction, key):
         await interaction.response.send_message(f"找不到 key `{key}` 的房間", ephemeral=True)
         return
     if interaction.user.id in member_ids(conn, room["id"]):
-        await interaction.response.send_message(f"你已經在「{room['name']}」裡了", ephemeral=True)
+        await interaction.response.send_message(f"你已經在「{room['name']}」裡了，用 /填時間 填可以的時間", ephemeral=True)
         return
 
     join_room(conn, key, interaction.user.id)
@@ -248,12 +250,12 @@ async def join(interaction: discord.Interaction, key: str):
     await do_join(interaction, key)
 
 
-# ---------- /填時間：選房間 → 選哪一晚 → 多選開始時間 ----------
+# ---------- /填時間：選房間 → 多選哪幾晚 → 多選開始時間（套用到選的每一晚） ----------
 
 class NightSelect(discord.ui.Select):
     def __init__(self, key, nights):
         options = [discord.SelectOption(label=night_label(n), value=n) for n in nights]
-        super().__init__(placeholder="選哪一晚", options=options)
+        super().__init__(placeholder="選哪幾晚（可多選）", options=options, min_values=1, max_values=len(options))
         self.key = key
 
     async def callback(self, interaction):
@@ -261,18 +263,18 @@ class NightSelect(discord.ui.Select):
         if room is None:
             await show(interaction, "這個房間已經不在了")
             return
-        await show(interaction, *times_step(room, self.values[0], interaction.user.id))
+        await show(interaction, *times_step(room, sorted(self.values), interaction.user.id))
 
 
 class TimeSelect(discord.ui.Select):
-    def __init__(self, room, night, times, picked):
+    def __init__(self, room, nights, times, picked):
         options = [
-            discord.SelectOption(label=slot_label(s, room["duration"]), value=s, default=s in picked)
-            for s in times
+            discord.SelectOption(label=slot_label(f"{nights[0]} {t}", room["duration"]), value=t, default=t in picked)
+            for t in times
         ]
         super().__init__(placeholder="可以開始的時間（可多選）", options=options, min_values=0, max_values=len(options))
         self.key = room["key"]
-        self.night = night
+        self.nights = nights
 
     async def callback(self, interaction):
         room = get_room(conn, self.key)
@@ -280,12 +282,18 @@ class TimeSelect(discord.ui.Select):
             await show(interaction, "這個房間已經不在了")
             return
         try:
-            set_availability(conn, room["id"], interaction.user.id, self.night, self.values, datetime.now(TZ))
+            saved = set_availability_nights(
+                conn, room["id"], interaction.user.id, self.nights, self.values, datetime.now(TZ),
+            )
         except ValueError as e:
             await show(interaction, f"儲存失敗：{e}")
             return
-        content, view = times_step(room, self.night, interaction.user.id)
-        await show(interaction, f"{content}\n✅ 已儲存（{len(self.values)} 個時段）", view)
+        content, view = times_step(room, self.nights, interaction.user.id)
+        await show(interaction, f"{content}\n✅ 已儲存（{len(self.nights)} 晚共 {saved} 個時段）", view)
+
+
+def nights_text(nights):
+    return "、".join(night_label(n) for n in nights)
 
 
 def night_step(room, user_id):
@@ -295,17 +303,18 @@ def night_step(room, user_id):
         return f"「{room['name']}」這一週已經沒有可以選的時間了", None
     view = new_view()
     view.add_item(NightSelect(room["key"], nights))
-    return f"「{room['name']}」要填哪一晚？", view
+    return f"「{room['name']}」要填哪幾晚？\n💡 如果多天可以的時間相同，可以直接多選日期，再一起選時間", view
 
 
-def times_step(room, night, user_id):
-    times = start_times(room, night, datetime.now(TZ))
+def times_step(room, nights, user_id):
+    times = times_of_day(room, nights, datetime.now(TZ))
     if not times:
-        return f"「{room['name']}」{night_label(night)} 的時間都過了", None
-    picked = set(get_availability(conn, room["id"], user_id, night))
+        return f"「{room['name']}」{nights_text(nights)} 的時間都過了", None
+    picked = common_availability(conn, room["id"], user_id, nights)
     view = new_view()
-    view.add_item(TimeSelect(room, night, times, picked))
-    return f"「{room['name']}」{night_label(night)}：勾可以開始的時間（全部取消 = 這晚都不行）", view
+    view.add_item(TimeSelect(room, nights, times, picked))
+    note = "（套用到選的每一晚，已經過去的會跳過；全部取消 = 這幾晚都不行）" if len(nights) > 1 else "（全部取消 = 這晚都不行）"
+    return f"「{room['name']}」{nights_text(nights)}：勾可以開始的時間{note}", view
 
 
 @bot.tree.command(name="填時間", description="填你可以開始的時間")
@@ -351,13 +360,24 @@ class DecideButton(discord.ui.DynamicItem[discord.ui.Button], template=r"decide:
             await notify(room, user_id, text, hint=True)
 
 
-def result_step(room, user_id):
-    if room["status"] == "decided":
-        return f"「{room['name']}」已定案：{slot_text(room['decided_at'], room['duration'])}", None
+#成員全列；還沒定案時加上誰還沒填
+def members_text(room, now):
+    members = member_ids(conn, room["id"])
+    text = f"\n\n👥 成員（{len(members)}）：" + " ".join(f"<@{m}>" for m in members)
+    if room["status"] == "open":
+        unfilled = unfilled_members(conn, room["id"], now)
+        text += "\n📝 還沒填：" + (" ".join(f"<@{m}>" for m in unfilled) if unfilled else "沒有，全員都填了")
+    return text
 
-    result = ranking(conn, room["id"], top=5, now=datetime.now(TZ))
+
+def result_step(room, user_id):
+    now = datetime.now(TZ)
+    if room["status"] == "decided":
+        return f"「{room['name']}」已定案：{slot_text(room['decided_at'], room['duration'])}" + members_text(room, now), None
+
+    result = ranking(conn, room["id"], top=5, now=now)
     if not result["slots"]:
-        return f"「{room['name']}」還沒有人填（還沒過去的）時間", None
+        return f"「{room['name']}」還沒有人填（還沒過去的）時間" + members_text(room, now), None
 
     members = member_ids(conn, room["id"])
     view = new_view() if is_leader(room, user_id) else None
@@ -368,7 +388,7 @@ def result_step(room, user_id):
         lines.append(f"{i}. {slot_text(s['start_at'], room['duration'])}　{s['count']}/{result['members']} 人（{who}）")
         if view is not None:
             view.add_item(DecideButton(room["key"], s["start_at"]))
-    return f"「{room['name']}」前 {len(lines)} 名：\n" + "\n".join(lines), view
+    return f"「{room['name']}」前 {len(lines)} 名：\n" + "\n".join(lines) + members_text(room, now), view
 
 
 @bot.tree.command(name="結果", description="看大家可以的時間（隊長可以定案）")
@@ -617,7 +637,24 @@ async def my_rooms(interaction: discord.Interaction):
         role = "隊長" if is_leader(r, interaction.user.id) else "成員"
         status = f"已定案 {slot_text(r['decided_at'], r['duration'])}" if r["status"] == "decided" else "填寫中"
         lines.append(f"**{r['name']}**　`{r['key']}`｜{role}｜{status}")
-    await show(interaction, "\n".join(lines))
+    view = new_view()
+    for r in rooms[:25]:                              # 一則訊息最多 25 個按鈕
+        view.add_item(ResultButton(r))
+    await show(interaction, "\n".join(lines) + "\n\n按房間看結果：", view)
+
+
+#我的房間 → 按房間直接看結果（跟 /結果 選房間後一樣）
+class ResultButton(discord.ui.Button):
+    def __init__(self, room):
+        super().__init__(label=room["name"][:80], style=discord.ButtonStyle.secondary)
+        self.key = room["key"]
+
+    async def callback(self, interaction):
+        room = get_room(conn, self.key)
+        if room is None:
+            await show(interaction, "這個房間已經不在了")
+            return
+        await show(interaction, *result_step(room, interaction.user.id))
 
 
 # ---------- 每分鐘：提醒、自動清理 ----------

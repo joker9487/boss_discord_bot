@@ -2,7 +2,7 @@ from datetime import datetime, timedelta
 
 from reminders import add_reminders, clear_reminders, reset_before
 from rooms import TIME_FMT, get_room_by_id, is_leader, now_str
-from slots import all_start_times, night_of, start_times
+from slots import all_start_times, night_of, start_times, times_of_day
 
 
 #用 id 找 room；找不到 → ValueError
@@ -135,3 +135,37 @@ def reschedule(conn, room_id, leader_id):
     except Exception:
         conn.rollback()
         raise
+
+
+#多晚一起填：hhmms（"HH:MM"）套到每一晚，某一晚已經過去的時間跳過；hhmms 空 = 這幾晚都清掉；回傳實際寫入幾個時段
+def set_availability_nights(conn, room_id, user_id, nights, hhmms, now=None):
+    room = _get_room(conn, room_id)
+    nights = list(dict.fromkeys(nights))
+    if not nights:
+        raise ValueError("至少要選一晚")
+    hhmms = set(hhmms)
+    bad = hhmms - set(times_of_day(room, nights, now))
+    if bad:
+        raise ValueError(f"不能選的時間：{sorted(bad)}")
+    total = 0
+    for night in nights:
+        starts = [s for s in start_times(room, night, now) if s[-5:] in hhmms]
+        set_availability(conn, room_id, user_id, night, starts, now)
+        total += len(starts)
+    return total
+
+
+#多晚一起填的預先勾選：每一晚都有勾的 "HH:MM"
+def common_availability(conn, room_id, user_id, nights):
+    sets = [{s[-5:] for s in get_availability(conn, room_id, user_id, n)} for n in nights]
+    return set.intersection(*sets) if sets else set()
+
+
+#還沒填（沒有任何還沒過去的時間）的成員，照加入順序
+def unfilled_members(conn, room_id, now=None):
+    rows = conn.execute(
+        "SELECT user_id FROM members WHERE room_id=? AND user_id NOT IN "
+        "(SELECT user_id FROM availability WHERE room_id=? AND start_at >= ?) ORDER BY rowid",
+        (room_id, room_id, now_str(now)),
+    )
+    return [r["user_id"] for r in rows]
