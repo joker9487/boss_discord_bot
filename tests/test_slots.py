@@ -2,7 +2,7 @@ from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
 from rooms import TZ
-from slots import night_options, slot_label, start_times
+from slots import night_options, slot_label, start_times, times_of_day
 
 NIGHT = "2026-10-30"
 BEFORE = datetime(2026, 10, 30, 12, 0, tzinfo=TZ)    # 那天中午，全部時間都還沒過
@@ -97,3 +97,21 @@ def test_slot_label():
 def test_slot_label_cross_midnight():
     assert slot_label("2026-10-30 23:00", 2) == "23:00–01:00"
     assert slot_label("2026-10-31 01:30", 3) == "01:30–04:30"
+
+
+# times_of_day
+def test_times_of_day_order_cross_midnight():
+    assert times_of_day(room("23:00", "01:00"), [NIGHT, "2026-10-31"], BEFORE) == [
+        "23:00", "23:30", "00:00", "00:30", "01:00",
+    ]
+
+
+def test_times_of_day_tonight_partly_past():
+    now = datetime(2026, 10, 30, 21, 10, tzinfo=TZ)
+    r = room("20:00", "22:00")
+    assert times_of_day(r, [NIGHT], now) == ["21:30", "22:00"]
+    assert times_of_day(r, [NIGHT, "2026-10-31"], now) == ["20:00", "20:30", "21:00", "21:30", "22:00"]  # 明晚都還能選
+
+
+def test_times_of_day_empty():
+    assert times_of_day(room("20:00", "22:00"), [], BEFORE) == []
