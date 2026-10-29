@@ -123,8 +123,8 @@ def test_off_grid_due_reminder_uses_new_start(conn, room):
 
 def test_off_grid_cleanup(conn, room):
     delay(conn, room["id"], LEADER, 15, NOW)
-    assert cleanup(conn, at(31, 20, 15)) == 0              # 剛好 24 小時還不刪
-    assert cleanup(conn, at(31, 20, 16)) == 1
+    assert cleanup(conn, at(30, 22, 14)) == 0              # 延後到 20:15，2 小時 → 22:15 才打完
+    assert cleanup(conn, at(30, 22, 15)) == 1
 
 
 # reschedule

@@ -157,15 +157,17 @@ def delete_room(conn, room_id):
      conn.commit()
 
 
-#自動清理：已定案且開始時間過 24 小時、或建房超過 7 天沒定案 → 刪掉；回傳刪了幾間
+#自動清理：已定案且打完（decided_at + duration 小時 <= now）、或建房超過 7 天沒定案 → 刪掉；回傳刪了幾間
+#延後過的房間 decided_at 已經是新時間，直接照算
 def cleanup(conn, now=None):
     if now is None:
         now = datetime.now(TZ)
-    decided_cutoff = now_str(now - timedelta(hours=24))
     open_cutoff = now_str(now - timedelta(days=7))
     cur = conn.execute(
-        "DELETE FROM rooms WHERE (status='decided' AND decided_at < ?) OR (status='open' AND created_at < ?)",
-        (decided_cutoff, open_cutoff),
+        "DELETE FROM rooms WHERE "
+        "(status='decided' AND strftime('%Y-%m-%d %H:%M', decided_at, '+' || duration || ' hours') <= ?) "
+        "OR (status='open' AND created_at < ?)",
+        (now_str(now), open_cutoff),
     )
     conn.commit()
     return cur.rowcount
