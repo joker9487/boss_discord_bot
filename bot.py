@@ -686,6 +686,34 @@ async def before_every_minute():
 
 # ---------- 其他 ----------
 
+HELP_TEXT = """\
+隊長
+・/建房 在你的團貼文裡打，會跳出表單，填團名、要打幾小時、最早跟最晚幾點可以開。時間範圍就是開放給隊員勾的時段。建好會有公告跟「加入」按鈕，隊員直接按就好
+・/結果 看大家哪個時段可以，會列出最多人能打的前五個時段，隊長會有「定案」按鈕，按下去就定了
+・/延後 有人會晚到，可以往後推 15 / 30 / 60 分
+・/改期 已經定好的時間可以改，改完重新用 /結果 再選（大家填過的時間會留著）
+・/關房 打完可以關掉（時間過了也會自動關）
+・/踢人 看不爽就踢
+
+隊員
+・/加入 房間代碼(key)，或直接按 bot 公告的「加入」
+・/填時間 → 選哪一晚 → 勾你「可以開打」的時間，想改就再填一次，會蓋掉那晚原本勾的
+・/結果 看現在哪個時段最多人
+・/我的房間 看自己在哪幾團、定案了沒
+・/晚到 臨時有事會晚到或不能來，有選項，會通知全團
+・/退出 不爽就退
+
+除了 /建房，其他指令都可以直接私訊 bot 打
+定案後 bot 會私訊大家，當天中午 12 點跟開打前 10 分鐘也會再私訊提醒
+私訊收不到的話，記得打開「允許伺服器成員私訊」，不然只會在貼文裡 tag 你"""
+
+
+@bot.tree.command(name="說明", description="指令怎麼用")
+@dm_ok
+async def help_command(interaction: discord.Interaction):
+    await interaction.response.send_message(HELP_TEXT, ephemeral=True)
+
+
 @bot.tree.command(description="測試 bot 有沒有活著")
 @dm_ok
 async def ping(interaction: discord.Interaction):

@@ -250,8 +250,8 @@ def test_kick_not_member(conn):
 NOW = datetime(2026, 10, 30, 12, 0, tzinfo=TZ)
 
 
-def room_with(conn, created_at, decided_at=None):
-    room = get_room(conn, make_room(conn))
+def room_with(conn, created_at, decided_at=None, duration=2):
+    room = get_room(conn, make_room(conn, duration))
     status = "decided" if decided_at else "open"
     conn.execute(
         "UPDATE rooms SET created_at=?, status=?, decided_at=? WHERE id=?",
@@ -261,17 +261,45 @@ def room_with(conn, created_at, decided_at=None):
     return room["id"]
 
 
+def left_ids(conn):
+    return {r["id"] for r in conn.execute("SELECT id FROM rooms")}
+
+
 def test_cleanup(conn):
-    old_decided = room_with(conn, "2026-10-28 10:00", "2026-10-29 11:59")   # 開打過了 24 小時又 1 分
-    new_decided = room_with(conn, "2026-10-20 10:00", "2026-10-29 13:00")   # 建很久，但開打才過 23 小時
+    ended = room_with(conn, "2026-10-28 10:00", "2026-10-30 09:00")         # 2 小時，11:00 打完
+    playing = room_with(conn, "2026-10-20 10:00", "2026-10-30 10:30")       # 建很久，但 12:30 才打完
     old_open = room_with(conn, "2026-10-23 11:59")                         # 7 天又 1 分沒定案
     new_open = room_with(conn, "2026-10-23 12:30")                         # 6 天多
     future = room_with(conn, "2026-10-29 10:00", "2026-10-30 20:00")
     assert cleanup(conn, NOW) == 2
-    left = {r["id"] for r in conn.execute("SELECT id FROM rooms")}
-    assert left == {new_decided, new_open, future}
-    assert member_ids(conn, old_decided) == []                             # CASCADE
+    assert left_ids(conn) == {playing, new_open, future}
+    assert member_ids(conn, ended) == []                                   # CASCADE
     assert member_ids(conn, old_open) == []
+
+
+def test_cleanup_exactly_at_end(conn):
+    just_ended = room_with(conn, "2026-10-29 10:00", "2026-10-30 10:00")     # 10:00 + 2 小時 = 12:00 = now → 刪
+    one_min_left = room_with(conn, "2026-10-29 10:00", "2026-10-30 10:01")   # 12:01 才打完
+    assert cleanup(conn, NOW) == 1
+    assert left_ids(conn) == {one_min_left}
+    assert just_ended not in left_ids(conn)
+
+
+@pytest.mark.parametrize("duration, decided_at, deleted", [
+    (1, "2026-10-30 11:00", True),       # 12:00 打完
+    (1, "2026-10-30 11:30", False),      # 12:30 打完
+    (3, "2026-10-30 09:00", True),       # 12:00 打完
+    (3, "2026-10-30 09:30", False),      # 12:30 打完
+])
+def test_cleanup_uses_duration(conn, duration, decided_at, deleted):
+    room_with(conn, "2026-10-29 10:00", decided_at, duration)
+    assert cleanup(conn, NOW) == (1 if deleted else 0)
+
+
+def test_cleanup_cross_midnight(conn):
+    room_with(conn, "2026-10-28 10:00", "2026-10-29 23:00", 3)               # 10/30 02:00 打完
+    assert cleanup(conn, datetime(2026, 10, 30, 1, 59, tzinfo=TZ)) == 0
+    assert cleanup(conn, datetime(2026, 10, 30, 2, 0, tzinfo=TZ)) == 1
 
 
 def test_cleanup_nothing(conn):
